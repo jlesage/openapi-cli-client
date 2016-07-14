@@ -47,6 +47,10 @@ def invoke(op, ctx, *args, **kwargs):
     request = construct_request(op, {}, **kwargs)
     c = RequestsClient()
     c.session.verify = not ctx.obj['INSECURE']
+    if ctx.obj['BASIC_AUTH'] is not None:
+        from six.moves.urllib import parse as urlparse
+        split = urlparse.urlsplit(op.swagger_spec.api_url)
+        c.set_basic_auth(split.hostname, ctx.obj['BASIC_AUTH'][0], ctx.obj['BASIC_AUTH'][1])
     future = c.request(request)
     try:
         incoming_response = future.result()
@@ -145,6 +149,25 @@ def openapi_spec_callback(ctx, param, value):
     return value
 
 
+def basic_auth_arg_callback(ctx, param, value):
+    new_value = None
+    if value:
+        credentials = value.split(':', 1)
+        user = credentials[0]
+        password = credentials[1] if len(credentials) == 2 else ''
+
+        if password.startswith('/'):
+            import os.path
+            if os.path.isfile(password):
+                with open(password, 'r') as pass_file:
+                    password = pass_file.read().splitlines()[0]
+
+        new_value = [user, password]
+
+    ctx.obj['BASIC_AUTH'] = new_value
+    return new_value
+
+
 def save_arg_callback(ctx, param, value):
     ctx.obj[param.name.upper()] = value
     return value
@@ -157,8 +180,13 @@ def save_arg_callback(ctx, param, value):
                     'available certificate authorities.  Also don\'t require '
                     'the URL host name to match the common name presented by '
                     'the certificate.'))
+@click.option('-b', '--basic-auth', nargs=1, metavar='<user:password>',
+              callback=basic_auth_arg_callback,
+              help=('Specify the user name and password to use for server HTTP '
+                    'basic authentication.  Password can be an absolute path '
+                    'to an existing file containing the password.'))
 @click.pass_context
-def main(ctx, openapi_spec, insecure):
+def main(ctx, openapi_spec, insecure, basic_auth):
     """
     Python command line client for REST APIs defined with OpenAPI-Spec/Swagger-Spec.
 
