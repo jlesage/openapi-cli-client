@@ -6,6 +6,7 @@ import re
 import requests
 import sys
 import yaml
+import bravado
 
 from functools import partial
 from bravado_core.spec import Spec
@@ -43,8 +44,11 @@ def invoke(op, ctx, *args, **kwargs):
     request = construct_request(op, {}, **kwargs)
     c = RequestsClient()
     future = c.request(request)
-    future.result()
-    clickclick.ok()
+    try:
+        future.result()
+        clickclick.ok()
+    except bravado.exception.HTTPError as e:
+        clickclick.error(' ERROR: %s.' % e)
 
 
 def sanitize_spec(spec):
