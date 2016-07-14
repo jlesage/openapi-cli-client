@@ -9,9 +9,12 @@ import yaml
 import bravado
 
 from functools import partial
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from bravado_core.spec import Spec
 from bravado.client import construct_request
 from bravado.requests_client import RequestsClient
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'], obj={})
 
@@ -43,6 +46,7 @@ def invoke(op, ctx, *args, **kwargs):
         clickclick.action('Invoking..')
     request = construct_request(op, {}, **kwargs)
     c = RequestsClient()
+    c.session.verify = not ctx.obj['INSECURE']
     future = c.request(request)
     try:
         incoming_response = future.result()
@@ -105,7 +109,8 @@ def openapi_spec_callback(ctx, param, value):
     if spec.startswith('https://') or spec.startswith('http://'):
         origin_url = spec
         try:
-            r = requests.get(spec)
+            verify = not ctx.obj.get('INSECURE', False)
+            r = requests.get(spec, verify=verify)
             r.raise_for_status()
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.HTTPError) as e:
@@ -140,10 +145,20 @@ def openapi_spec_callback(ctx, param, value):
     return value
 
 
+def save_arg_callback(ctx, param, value):
+    ctx.obj[param.name.upper()] = value
+    return value
+
+
 @click.command(cls=OpenAPIClientCLI, context_settings=CONTEXT_SETTINGS)
 @click.argument('OPENAPI_SPEC', callback=openapi_spec_callback)
+@click.option('-i', '--insecure', is_flag=True, callback=save_arg_callback,
+              help=('Don\'t check the server certificate against the '
+                    'available certificate authorities.  Also don\'t require '
+                    'the URL host name to match the common name presented by '
+                    'the certificate.'))
 @click.pass_context
-def main(ctx, openapi_spec):
+def main(ctx, openapi_spec, insecure):
     """
     Python command line client for REST APIs defined with OpenAPI-Spec/Swagger-Spec.
 
