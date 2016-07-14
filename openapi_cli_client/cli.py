@@ -45,7 +45,10 @@ def invoke(op, ctx, *args, **kwargs):
     c = RequestsClient()
     future = c.request(request)
     try:
-        future.result()
+        incoming_response = future.result()
+        if op.http_method in ['get', 'list']:
+            clickclick.action('Response: \n')
+            clickclick.secho(incoming_response.text)
         clickclick.ok()
     except bravado.exception.HTTPError as e:
         clickclick.error(' ERROR: %s.' % e)
