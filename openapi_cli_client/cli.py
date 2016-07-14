@@ -1,5 +1,7 @@
 import click
 import clickclick
+import os
+import stat
 import re
 import requests
 import sys
@@ -95,12 +97,34 @@ def openapi_spec_callback(ctx, param, value):
     origin_url = None
     if spec.startswith('https://') or spec.startswith('http://'):
         origin_url = spec
-        r = requests.get(spec)
-        r.raise_for_status()
-        spec = yaml.safe_load(r.text)
+        try:
+            r = requests.get(spec)
+            r.raise_for_status()
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.HTTPError) as e:
+            raise click.BadParameter(('failed to fetch OpenAPI specification '
+                                      'at \'%s\'.\nDetails: %s.') % (spec, e))
+        try:
+            spec = yaml.safe_load(r.text)
+        except (yaml.reader.ReaderError, yaml.scanner.ScannerError) as e:
+            raise click.BadParameter('invalid OpenAPI specification at '
+                                     '\'%s\'.\nDetails: %s.' % (spec, e))
     else:
+        try:
+           st = os.stat(spec)
+        except OSError:
+            raise click.BadParameter('%s does not exist.' % spec)
+        if not stat.S_ISREG(st.st_mode):
+            raise click.BadParameter('%s is not a file.' % spec)
+        if not os.access(spec, os.R_OK):
+            raise click.BadParameter('%s is not readable.' % spec)
+
         with open(spec, 'rb') as fd:
-            spec = yaml.safe_load(fd.read())
+            try:
+                spec = yaml.safe_load(fd.read())
+            except (yaml.reader.ReaderError, yaml.scanner.ScannerError) as e:
+                raise click.BadParameter('%s is not a valid OpenAPI '
+                                         'specification.\nDetails: %s.' % (spec, e))
 
     spec = sanitize_spec(spec)
     spec = Spec.from_dict(spec, origin_url=origin_url)
