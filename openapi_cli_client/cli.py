@@ -97,7 +97,7 @@ class OpenAPIClientCLI(click.MultiCommand):
             cmd = click.Command(name, callback=partial(invoke, op=op, ctx=ctx), short_help=op.op_spec.get('summary'))
             for param_name, param in op.params.items():
                 if param.required:
-                    arg = click.Argument([param.name])
+                    arg = click.Argument([param.name, param.name])
                     cmd.params.append(arg)
                 else:
                     arg = click.Option(['--' + param.name])
