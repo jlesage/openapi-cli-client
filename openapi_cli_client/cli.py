@@ -20,6 +20,8 @@ CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'], obj={})
 
 REPLACEABLE_COMMAND_CHARS = re.compile('[^a-z0-9]+')
 
+SUBCOMMAND_LEVELS = 2  # Min 2
+
 
 def normalize_command_name(s):
     '''
@@ -71,40 +73,150 @@ def sanitize_spec(spec):
     return spec
 
 
-class OpenAPIClientCLI(click.MultiCommand):
+class OpenAPIClientCLI(click.Group):
     def list_commands(self, ctx):
-        commands = []
-        if 'SPEC' in ctx.obj:
-            for res_name, res in ctx.obj['SPEC'].resources.items():
-                commands.append(normalize_command_name(res_name))
+        """
+        Returns a list of subcommand names in the order they should appear.
+        """
+        if not self.commands and 'SPEC' in ctx.obj:
+            self.commands = self.generate_cli(ctx)
 
-        return commands
+        return sorted(self.commands)
 
 
     def get_command(self, ctx, name):
-        for res_name, res in ctx.obj['SPEC'].resources.items():
-            if name == normalize_command_name(res_name):
-                return self.gen_command_grp_from_spec(ctx, res_name, res)
+        """
+        Given a context and a command name, this returns a :class:`Command`
+        object if it exists or returns `None`.
+        """
+        if not self.commands and 'SPEC' in ctx.obj:
+            self.commands = self.generate_cli(ctx)
 
-        return None
+        return self.commands.get(name)
 
 
-    def gen_command_grp_from_spec(self, ctx, res_name, res):
-        grp = clickclick.AliasedGroup(normalize_command_name(res_name), short_help='Manage {}'.format(res_name))
-        for op_name, op in res.operations.items():
-            name = get_command_name(op)
+    def generate_command(self, ctx, op):
+        """
+        Generate and return a Click command.
 
-            cmd = click.Command(name, callback=partial(invoke, op=op, ctx=ctx), short_help=op.op_spec.get('summary'))
-            for param_name, param in op.params.items():
-                if param.required:
-                    arg = click.Argument([param.name, param.name])
-                    cmd.params.append(arg)
+        NOTE: To have a constent CLI, parameters need to be ordered.  Path
+              parameters keep the order in which they appear in the path.  Then
+              is following other parameters, sorted alphabetically.
+        """
+        params = []
+        cmd_help = ''
+        cmd = click.Command(get_command_name(op),
+                            callback=partial(invoke, op=op, ctx=ctx),
+                            short_help=op.op_spec.get('summary'))
+
+        # First, handle path parameters.
+        for p in op.path_name.split('/'):
+            if not p.startswith('{'):
+                continue
+
+            param_name = p[1:-1]
+            cmd.params.append(click.Argument([param_name, param_name]))
+            param_desc = op.params[param_name].param_spec.get('description',
+                                                'No description available.')
+            cmd_help += '%s: %s\n\n' % (param_name.upper(), param_desc)
+
+        # Then, handle other parameters.
+        for param_name, param in op.params.items():
+            if param.param_spec.get('in', '') == 'path':
+                continue
+
+            if param.required:
+                arg = click.Argument([param.name, param.name])
+                params.append(arg)
+                param_desc = param.param_spec.get('description',
+                                                  'No description available.')
+                cmd_help = cmd_help + '%s: %s\n\n' % (param.name.upper(), param_desc)
+            else:
+                arg = click.Option(['--' + param.name])
+                params.append(arg)
+
+        if params:
+            params.sort(key=lambda param: param.name)
+            cmd.params.extend(params)
+        cmd.help = cmd_help
+
+        return cmd
+
+
+    def generate_cli(self, ctx):
+        """
+        Generate all commands for the API specification.
+        """
+        spec = ctx.obj['SPEC']
+        commands = {}
+
+        def all_spec_op(spec):
+            """
+            Iterate through all operations of the specification, eliminating
+            duplicates.
+            """
+            processed_paths = []
+            for res_name, res in spec.resources.items():
+                for key, op in res.operations.items():
+                    path = op.path_name + '/' + get_command_name(op)
+                    if path in processed_paths:
+                        continue
+                    processed_paths.append(path)
+                    yield op
+
+        # Get all operations and sort them by path.
+        all_op = [ op for op in all_spec_op(spec) ]
+        all_op.sort(key=lambda op: op.path_name)
+
+        group_stack = []
+        cur_path = '/'
+
+        for op in all_op:
+            # Translate the real path to a command hierarchy.
+            # Ex: With 2 subcommand levels, the real path
+            #   '/users/{name}/pref/something'
+            # is translated to:
+            #   '/users/pref-something'
+            path = op.path_name
+            # 1) Remove parameters from path.
+            path = re.sub(r'{[^{}]+}', '', path)
+            # 2) Normalize the path.
+            path = os.path.normpath(path)
+            # 3) Split the according to the number of subcommand levels and then
+            #    normalize parts as command names, before rebuilding a full
+            #    path.
+            path = '/' + '/'.join([ normalize_command_name(p) for p in path[1:].split('/', SUBCOMMAND_LEVELS - 1) ])
+
+            # Handle the relative path to the new path, calculated from the
+            # previous one.
+            path_parts = os.path.relpath(path, cur_path).split('/')
+            for i, p in enumerate(path_parts):
+                if p == '..':
+                    # Moved back in the path: Pop group from stack.
+                    group_stack.pop()
+                elif p == '.':
+                    # Same path: No group to handle.
+                    pass
                 else:
-                    arg = click.Option(['--' + param.name])
-                    cmd.params.append(arg)
+                    # Moved forward in the path: Create group and push it to
+                    # stack.
+                    group_name = p
+                    group = click.Group(group_name, short_help='Manage {}'.format(group_name))
+                    if len(group_stack) == 0:
+                        commands[group_name] = group
+                    else:
+                        group_stack[-1].add_command(group)
+                    group_stack.append(group)
 
-            grp.add_command(cmd)
-        return grp
+                # Add command if we are at the end of the path.
+                if i == len(path_parts) - 1:
+                    command_name = get_command_name(op)
+                    group_stack[-1].add_command(self.generate_command(ctx, op))
+
+            # Save the current path.
+            cur_path = path
+
+        return commands
 
 
 def openapi_spec_callback(ctx, param, value):
@@ -195,4 +307,3 @@ def main(ctx, openapi_spec, insecure, basic_auth):
     the specification can be fetched.
     """
     pass
-
